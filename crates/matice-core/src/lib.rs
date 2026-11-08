@@ -1,6 +1,5 @@
 use anyhow::{Context, Result, bail};
 use base64::prelude::*;
-use indicatif::ProgressBar;
 use krilla::{
     Data, Document,
     geom::{Size, Transform},
@@ -10,7 +9,7 @@ use krilla::{
 use regex::Regex;
 use reqwest_middleware::ClientBuilder;
 use std::{
-    process::exit,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -22,22 +21,22 @@ use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
 
 const JOBS: usize = 4;
 const PADDING: f32 = 14.0;
+//const URL: &str = "https://data.matricula-online.eu/en/BiH/banjaluka/bosansko-grahovo/01-01/?pg=1";
 
 // A4 in portrait orientation, in points
 const A4_WIDTH: f32 = 595.28;
 const A4_HEIGHT: f32 = 841.89;
 
-#[tokio::main]
-async fn main() {
-    let args: Vec<String> = std::env::args().collect();
+/// Pages finished so far out of the total. `total` stays 0 until the page list is fetched.
+#[derive(Default)]
+pub struct DownloadProgress {
+    pub done: AtomicU64,
+    pub total: AtomicU64,
+}
 
-    if args.len() != 2 {
-        eprintln!("Usage: matica URL");
-        exit(2);
-    }
-
-    let metadata = get_metadata(args[1].to_string()).await.unwrap();
-    download(metadata).await;
+pub async fn download(url: &str, path: PathBuf, progress: Arc<DownloadProgress>) {
+    let metadata = get_metadata(url).await.unwrap();
+    download_helper(metadata, path, progress).await;
 }
 
 struct Url {
@@ -45,17 +44,17 @@ struct Url {
     label: String,
 }
 
-struct Metadata {
+pub struct DonwloadMetadata {
     urls: Vec<Url>,
 }
 
-async fn get_metadata(url: String) -> Result<Metadata> {
+async fn get_metadata(url: &str) -> Result<DonwloadMetadata> {
     let files_regex = Regex::new(r#""files": \[([^\]]+)\]"#).unwrap();
     let labels_raw_regex = Regex::new(r#""labels": \[([^\]]+)\]"#).unwrap();
     let base64_url_regex = Regex::new(r#""/image/([^"]+)/""#).unwrap();
     let labels_regex = Regex::new(r#""(.*?)""#).unwrap();
 
-    let html = reqwest::get(&url).await?.text().await?;
+    let html = reqwest::get(url).await?.text().await?;
 
     let files = files_regex
         .captures(&html)
@@ -91,7 +90,7 @@ async fn get_metadata(url: String) -> Result<Metadata> {
         );
     }
 
-    let mut metadata = Metadata { urls: vec![] };
+    let mut metadata = DonwloadMetadata { urls: vec![] };
 
     for i in 0..base64_urls.len() {
         metadata.urls.push(Url {
@@ -102,7 +101,11 @@ async fn get_metadata(url: String) -> Result<Metadata> {
     Ok(metadata)
 }
 
-async fn download(metadata: Metadata) {
+async fn download_helper(
+    metadata: DonwloadMetadata,
+    path: PathBuf,
+    progress: Arc<DownloadProgress>,
+) {
     let mut tasks = JoinSet::new();
 
     // TODO:check if retry policy works
@@ -113,18 +116,15 @@ async fn download(metadata: Metadata) {
             .build(),
     );
     let semaphore = Arc::new(Semaphore::new(JOBS));
-    let total = Arc::new(AtomicU64::new(0));
-
-    let pb = Arc::new(tokio::sync::Mutex::new(ProgressBar::new(
-        metadata.urls.len() as u64,
-    )));
-    pb.lock().await.set_position(0);
+    progress
+        .total
+        .store(metadata.urls.len() as u64, Ordering::Relaxed);
 
     for url in metadata.urls.into_iter() {
-        let total = total.clone();
+        let progress = progress.clone();
         let client = client.clone();
         let semaphore = semaphore.clone();
-        let pb = pb.clone();
+        let path = path.clone();
 
         tasks.spawn(async move {
             let _permit = semaphore.acquire().await?;
@@ -135,14 +135,12 @@ async fn download(metadata: Metadata) {
             )?;
             let res = client.get(&decoded_url).send().await?.error_for_status()?;
 
-            tokio::fs::write(format!("/home/proivan1711/Downloads/{}.pdf", url.label), {
+            tokio::fs::write(path.join(format!("{}.pdf", url.label)), {
                 let res_bytes = res.bytes().await?;
                 tokio::task::spawn_blocking(|| img_to_pdf(res_bytes).unwrap()).await?
             })
             .await?;
-            let new_num = total.load(Ordering::Relaxed) + 1;
-            total.store(new_num, Ordering::Relaxed);
-            pb.lock().await.set_position(new_num);
+            progress.done.fetch_add(1, Ordering::Relaxed);
             drop(_permit);
 
             Ok::<_, anyhow::Error>(())

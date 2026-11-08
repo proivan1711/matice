@@ -1,0 +1,16 @@
+[package]
+name = "matice"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+bytes = "1.12.1"
+futures-util = "0.3.34"
+krilla = { version = "0.8.2", features = ["pdf"] }
+regex = "1.13.1"
+reqwest = { version = "0.13.5", features = ["stream"] }
+reqwest-middleware = "0.5.2"
+reqwest-retry = "0.9.1"
+tokio = { version = "1.54.1", features = ["fs", "macros", "rt-multi-thread", "sync"] }
