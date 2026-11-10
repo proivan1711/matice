@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
